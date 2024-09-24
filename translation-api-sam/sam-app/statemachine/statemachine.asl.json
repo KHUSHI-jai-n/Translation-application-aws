@@ -1,0 +1,74 @@
+{
+    "Comment": "A description of my state machine",
+    "StartAt": "Get Translated Text from DynamoDb",
+    "States": {
+      "Get Translated Text from DynamoDb": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::dynamodb:getItem",
+        "Parameters": {
+          "TableName": "TranslationTable",
+          "Key": {
+            "id": {
+              "S.$": "States.Hash($[0].Text, 'SHA-1')"
+            }
+          }
+        },
+        "Next": "Check if text was translated",
+        "ResultPath": "$[0].Result"
+      },
+      "Check if text was translated": {
+        "Type": "Choice",
+        "Choices": [
+          {
+            "Variable": "$[0].Result.Item",
+            "IsPresent": true,
+            "Comment": "Yes",
+            "Next": "Map Data to Output"
+          }
+        ],
+        "Default": "TranslateText"
+      },
+      "Map Data to Output": {
+        "Type": "Pass",
+        "Parameters": {
+          "TranslatedText.$": "$[0].Result.Item.TranslatedText.S"
+        },
+        "End": true
+      },
+      "TranslateText": {
+        "Type": "Task",
+        "Parameters": {
+          "SourceLanguageCode": "EN",
+          "TargetLanguageCode": "DE",
+          "Text.$": "$[0].Text"
+        },
+        "Resource": "arn:aws:states:::aws-sdk:translate:translateText",
+        "Next": "Put Translated Text in DynamoDb",
+        "ResultPath": "$[0].Result",
+        "ResultSelector": {
+          "TranslatedText.$": "$.TranslatedText"
+        }
+      },
+      "Put Translated Text in DynamoDb": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::dynamodb:putItem",
+        "Parameters": {
+          "TableName": "TranslationTable",
+          "Item": {
+            "id": {
+              "S.$": "States.Hash($[0].Text, 'SHA-1')"
+            },
+            "OriginalText": {
+              "S.$": "$[0].Text"
+            },
+            "TranslatedText": {
+              "S.$": "$[0].Result.TranslatedText"
+            }
+          }
+        },
+        "ResultPath": "$[0].InsertResult",
+        "OutputPath": "$[0].Result",
+        "End": true
+      }
+    }
+  }

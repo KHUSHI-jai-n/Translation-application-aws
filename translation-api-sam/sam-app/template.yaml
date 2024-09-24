@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: SAM template for the translation API
+
+Resources:
+# Translation State Machine
+  TranslationStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/statemachine.asl.json
+      Logging:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt StateMachineLogGroup.Arn
+      Policies:
+        - AWSXrayWriteOnlyAccess
+        - AmazonDynamoDBFullAccess
+        - TranslateFullAccess
+        - Statement:
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:PutResourcePolicy
+                - logs:DescribeResourcePolicies
+                - logs:DescribeLogGroups
+              Resource: "*"
+      Tracing:
+        Enabled: true
+      Type: EXPRESS
+      Events:
+        ApiPOST:
+          Type: Api
+          Properties:
+            Path: /translate
+            Method: POST
+            RestApiId: !Ref TranslationApi
+  # Log group for the translation state machine          
+  StateMachineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - /aws/vendedlogs/states/${AWS::StackName}-${ResourceId}-Logs
+        - ResourceId: TranslationStateMachine
+  #API Gateway resource to synchronously invoke the Translation State Machine
+  TranslationApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub
+        - ${ResourceName} From Stack ${AWS::StackName}
+        - ResourceName: Api
+      StageName: Prod
+      DefinitionBody:
+        openapi: "3.0"
+        info: {}
+        paths:
+          /translate:
+            post:
+              responses:
+                "200":
+                  description: default OK response
+              x-amazon-apigateway-integration:
+                credentials: !GetAtt ApiToStateMachineRole.Arn
+                httpMethod: POST
+                type: aws
+                uri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:states:action/StartSyncExecution
+                responses:
+                  default:
+                    statusCode: 200
+                requestTemplates:
+                  application/json: !Sub |-
+                    {
+                      "input": "$util.escapeJavaScript([$input.json('$')])",
+                      "stateMachineArn": "${TranslationStateMachine}"
+                    }
+      EndpointConfiguration: REGIONAL
+      TracingEnabled: true
+      Cors:
+        MaxAge: 5
+  # Role for API Gateway to enable invocation of the Translation State Machine
+  ApiToStateMachineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: !Sub apigateway.${AWS::URLSuffix}
+      Policies:
+        - PolicyName: ExecuteStateMachine
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: states:StartSyncExecution
+                Resource: !GetAtt TranslationStateMachine.Arn
+  # Amazon SQS queue to asynchronously invoke the Translation State Machine               
+  Queue:
+    Type: AWS::SQS::Queue 
+  # Role for EventBridge Pipes to read from SQS and invoke Translation State Machine
+  EventBridgePipesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - pipes.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+        - PolicyName: ReadSQS
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'sqs:ReceiveMessage'
+                  - 'sqs:DeleteMessage'
+                  - 'sqs:GetQueueAttributes'
+                Resource: !GetAtt Queue.Arn
+        - PolicyName: ExecuteSFN
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'states:StartExecution'
+                Resource: !Ref TranslationStateMachine
+  # EventBridge pipe definition
+  SqsToTranslationStateMachine:
+    Type: AWS::Pipes::Pipe
+    Properties:
+      RoleArn: !GetAtt EventBridgePipesRole.Arn
+      Source: !GetAtt Queue.Arn
+      SourceParameters:
+        SqsQueueParameters:
+          BatchSize: 1
+      Target: !Ref TranslationStateMachine
+      TargetParameters:
+        InputTemplate: |
+          {"Text": <$.body.Text>}
+Outputs:
+  TranslationStateMachineName:
+    Description: Name of the Translation state machine created by SAM 
+    Value: !GetAtt TranslationStateMachine.Name
+  TranslationApiEndpoint:
+    Description: HTTP endpoint of the translation API
+    Value: !Sub "https://${TranslationApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/translate"
+  SqsQueueName:
+    Description: Name of the SQS Queue
+    Value: !GetAtt Queue.QueueName
