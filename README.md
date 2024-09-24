@@ -17,4 +17,4 @@
 3. Invoke the state machine from an SQS queue using EventBridge Pipes
 4. Create a SAM template to deploy the application
 
-I referred the following AWS Workshop to build this project [link]https://catalog.workshops.aws/svsmindsetapps/en-US
+I referred the following AWS Workshop to build this project [link](https://catalog.workshops.aws/svsmindsetapps/en-US)
